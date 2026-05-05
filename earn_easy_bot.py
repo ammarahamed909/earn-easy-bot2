@@ -30,7 +30,8 @@ def shorten_link(url):
         )
         data = r.json()
         if data.get("status") == "success":
-            return data.get("shortenedUrl", "")
+           url = data.get("shortenedUrl", "") or data.get("shortened_url", "")
+return url.replace("\\/", "/")
     except Exception as e:
         logger.error(f"Error shortening link: {e}")
     return ""
