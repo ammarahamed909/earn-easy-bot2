@@ -1,135 +1,187 @@
 import logging
+import requests
+import secrets
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 BOT_TOKEN = "8263620123:AAEslo1rbEeqCDCkxz1iX_21XzcugPvXhvE"
-ADMIN_ID = 6766597560 # غير ده لـ ID بتاعك
-MIN_WITHDRAWAL = 5.00  # الحد الأدنى للسحب
-POINTS_PER_DOLLAR = 1000  # 1000 نقطة = $1
+SHRINKEARN_API = "a92843ecf51915018be63e04fd74664724a935e5"
+BOT_USERNAME = "EarnEasyOnlineBot"  # غير ده لـ username البوت بتاعك
+ADMIN_ID = 6766597560
+MIN_WITHDRAWAL = 5.00
+POINTS_PER_DOLLAR = 1000
 
 users_db = {}
-# links_db: {link_id: {"url": "...", "title": "...", "points": 10}}
-links_db = {}
-link_counter = 1
+# tokens_db: {token: user_id} عشان نعرف مين جه من الرابط
+tokens_db = {}
+# user_tokens: {user_id: {"token": "...", "short_url": "...", "clicks": 0}}
+user_tokens = {}
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 def get_user(user_id, name=""):
     if user_id not in users_db:
-        users_db[user_id] = {"name": name, "points": 0, "withdrawn": 0.0, "joined": True}
+        users_db[user_id] = {"name": name, "points": 0, "withdrawn": 0.0}
     return users_db[user_id]
 
 def points_to_dollars(points):
     return points / POINTS_PER_DOLLAR
 
+def shorten_link(url, alias=""):
+    try:
+        params = {"api": SHRINKEARN_API, "url": url, "format": "json"}
+        if alias:
+            params["alias"] = alias
+        r = requests.get("https://shrinkearn.com/api", params=params, timeout=15)
+        data = r.json()
+        if data.get("status") == "success":
+            return data.get("shortenedUrl", "").replace("\\/", "/")
+    except Exception as e:
+        logging.error(f"ShrinkEarn error: {e}")
+    return ""
+
 def main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎯 روابط متاحة", callback_data="browse_links"),
+        [InlineKeyboardButton("🔗 رابطي الخاص", callback_data="my_link"),
          InlineKeyboardButton("💰 رصيدي", callback_data="balance")],
         [InlineKeyboardButton("💸 سحب", callback_data="withdraw"),
-         InlineKeyboardButton("❓ مساعدة", callback_data="help")]
+         InlineKeyboardButton("📊 إحصائياتي", callback_data="mystats")],
+        [InlineKeyboardButton("❓ مساعدة", callback_data="help")]
     ])
 
 # ========== START ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     get_user(user.id, user.first_name)
+
+    # لو جه من رابط مختصر
+    if context.args and context.args[0].startswith("reward_"):
+        parts = context.args[0].split("_")
+        if len(parts) == 3:
+            token = parts[2]
+            referrer_id = int(parts[1])
+
+            # تأكد إن مش نفس الشخص
+            if referrer_id != user.id and token in tokens_db:
+                # احسب النقاط
+                referrer_data = get_user(referrer_id)
+                referrer_data["points"] += 10  # 10 نقاط لكل كليك حقيقي
+
+                # سجل الكليك
+                if referrer_id in user_tokens:
+                    user_tokens[referrer_id]["clicks"] += 1
+
+                # ابعت إشعار لصاحب الرابط
+                try:
+                    await context.bot.send_message(
+                        referrer_id,
+                        f"🎉 *حد ضغط على رابطك!*\n\n+10 نقاط تم إضافتها لرصيدك!",
+                        parse_mode="Markdown"
+                    )
+                except:
+                    pass
+
+                await update.message.reply_text(
+                    f"✅ *أهلاً {user.first_name}!*\n\nلقد وصلت عبر رابط مميز!\nابدأ وأنشئ رابطك الخاص واكسب أنت كمان! 🚀",
+                    parse_mode="Markdown",
+                    reply_markup=main_menu()
+                )
+                return
+
     await update.message.reply_text(
-        f"🌟 *أهلاً {user.first_name}!*\n\n"
+        f"🌟 *أهلاً {user.first_name} في Earn Easy Online!*\n\n"
         "💡 *كيف تكسب؟*\n"
-        "1️⃣ اضغط على رابط\n"
-        "2️⃣ شاهد الإعلان وانتظر\n"
-        "3️⃣ اضغط تخطي\n"
-        "4️⃣ تكسب نقاط!\n\n"
-        f"💰 *1000 نقطة = $1*\n"
+        "1️⃣ اضغط 'رابطي الخاص'\n"
+        "2️⃣ شارك الرابط المختصر مع الناس\n"
+        "3️⃣ لما حد يضغط عليه ويفتح البوت تكسب نقاط!\n\n"
+        "💰 *1000 نقطة = $1*\n"
         f"📌 الحد الأدنى للسحب: ${MIN_WITHDRAWAL}",
         parse_mode="Markdown",
         reply_markup=main_menu()
     )
 
-# ========== BROWSE LINKS ==========
-async def browse_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========== MY LINK ==========
+async def my_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user = query.from_user
+    get_user(user.id, user.first_name)
 
-    if not links_db:
+    # لو عنده رابط قديم
+    if user.id in user_tokens:
+        info = user_tokens[user.id]
         await query.edit_message_text(
-            "😔 مفيش روابط متاحة دلوقتي!\nرجع تاني بعد شوية.",
+            f"🔗 *رابطك الخاص:*\n\n`{info['short_url']}`\n\n"
+            f"📊 عدد الكليكات: *{info['clicks']}*\n"
+            f"💰 نقاطك من الرابط: *{info['clicks'] * 10}*\n\n"
+            "شارك الرابط ده مع أصحابك وأكسب نقاط على كل كليك!",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 تجديد الرابط", callback_data="renew_link")],
+                [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+            ])
+        )
+        return
+
+    await query.edit_message_text(
+        "⏳ جاري إنشاء رابطك الخاص...",
+    )
+
+    # توليد token فريد
+    token = secrets.token_hex(8)
+    reward_url = f"https://t.me/{BOT_USERNAME}?start=reward_{user.id}_{token}"
+
+    # اختصار الرابط عبر ShrinkEarn
+    short_url = shorten_link(reward_url)
+
+    if not short_url:
+        await query.edit_message_text(
+            "❌ حدث خطأ! حاول تاني.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="back")]])
         )
         return
 
-    keyboard = []
-    for lid, link in links_db.items():
-        keyboard.append([InlineKeyboardButton(
-            f"🔗 {link['title']} (+{link['points']} نقطة)",
-            callback_data=f"link_{lid}"
-        )])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="back")])
+    # حفظ التوكن
+    tokens_db[token] = user.id
+    user_tokens[user.id] = {"token": token, "short_url": short_url, "clicks": 0}
 
     await query.edit_message_text(
-        "🎯 *الروابط المتاحة:*\n\nاضغط على أي رابط واحصل على نقاط!",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ========== CLICK LINK ==========
-async def click_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    data = get_user(user.id, user.first_name)
-
-    lid = int(query.data.split("_")[1])
-    if lid not in links_db:
-        await query.edit_message_text("❌ الرابط مش موجود!")
-        return
-
-    link = links_db[lid]
-    points = link["points"]
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌐 فتح الرابط", url=link["url"])],
-        [InlineKeyboardButton(f"✅ تخطي (+{points} نقطة)", callback_data=f"skip_{lid}")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="browse_links")]
-    ])
-
-    await query.edit_message_text(
-        f"🔗 *{link['title']}*\n\n"
-        f"1️⃣ اضغط 'فتح الرابط'\n"
-        f"2️⃣ انتظر الإعلان\n"
-        f"3️⃣ اضغط 'تخطي' لتحصل على *{points} نقطة*",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-
-# ========== SKIP LINK (earn points) ==========
-async def skip_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    data = get_user(user.id, user.first_name)
-
-    lid = int(query.data.split("_")[1])
-    if lid not in links_db:
-        await query.edit_message_text("❌ الرابط مش موجود!")
-        return
-
-    points = links_db[lid]["points"]
-    data["points"] += points
-    total = data["points"]
-    dollars = points_to_dollars(total)
-
-    await query.edit_message_text(
-        f"✅ *تم! كسبت {points} نقطة!*\n\n"
-        f"📊 رصيدك الكلي: *{total} نقطة*\n"
-        f"💵 = ${dollars:.2f}\n\n"
-        f"{'✅ يمكنك السحب الآن!' if dollars >= MIN_WITHDRAWAL else f'تحتاج {POINTS_PER_DOLLAR * MIN_WITHDRAWAL - total:.0f} نقطة للسحب'}",
+        f"✅ *تم إنشاء رابطك الخاص!*\n\n"
+        f"🔗 رابطك:\n`{short_url}`\n\n"
+        "📢 شارك الرابط ده مع أصحابك!\n"
+        "💰 هتكسب *10 نقاط* على كل شخص يفتح الرابط!\n\n"
+        "⚡ الناس هتشوف إعلان الأول وبعدين يوصلوا للبوت!",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎯 روابط أكثر", callback_data="browse_links")],
-            [InlineKeyboardButton("💰 رصيدي", callback_data="balance")]
+            [InlineKeyboardButton("📊 إحصائياتي", callback_data="mystats")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
         ])
+    )
+
+# ========== RENEW LINK ==========
+async def renew_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+
+    await query.edit_message_text("⏳ جاري تجديد رابطك...")
+
+    token = secrets.token_hex(8)
+    reward_url = f"https://t.me/{BOT_USERNAME}?start=reward_{user.id}_{token}"
+    short_url = shorten_link(reward_url)
+
+    if not short_url:
+        await query.edit_message_text("❌ حدث خطأ! حاول تاني.")
+        return
+
+    old_clicks = user_tokens.get(user.id, {}).get("clicks", 0)
+    tokens_db[token] = user.id
+    user_tokens[user.id] = {"token": token, "short_url": short_url, "clicks": old_clicks}
+
+    await query.edit_message_text(
+        f"✅ *تم تجديد رابطك!*\n\n`{short_url}`\n\nشاركه مع أصحابك! 🚀",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="back")]])
     )
 
 # ========== BALANCE ==========
@@ -152,6 +204,24 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💸 سحب", callback_data="withdraw")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
         ])
+    )
+
+# ========== MY STATS ==========
+async def mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    data = get_user(user.id, user.first_name)
+    clicks = user_tokens.get(user.id, {}).get("clicks", 0)
+
+    await query.edit_message_text(
+        f"📊 *إحصائياتك*\n\n"
+        f"🔗 كليكات الرابط: *{clicks}*\n"
+        f"⭐ إجمالي النقاط: *{data['points']}*\n"
+        f"💵 بالدولار: *${points_to_dollars(data['points']):.2f}*\n"
+        f"💸 تم سحبه: *${data['withdrawn']:.2f}*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="back")]])
     )
 
 # ========== WITHDRAW ==========
@@ -188,13 +258,8 @@ async def pay_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = get_user(user.id, user.first_name)
     dollars = points_to_dollars(data["points"])
 
-    methods = {
-        "pay_usdt": "USDT TRC20",
-        "pay_polygon": "Polygon (MATIC)",
-        "pay_vodafone": "فودافون كاش"
-    }
+    methods = {"pay_usdt": "USDT TRC20", "pay_polygon": "Polygon (MATIC)", "pay_vodafone": "فودافون كاش"}
     method = methods[query.data]
-
     context.user_data["withdraw_method"] = method
     context.user_data["withdraw_amount"] = dollars
 
@@ -207,137 +272,70 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if "withdraw_method" not in context.user_data:
-        await handle_admin_command(update, context)
+        await update.message.reply_text(
+            "📌 استخدم الأزرار في القائمة!",
+            reply_markup=main_menu()
+        )
         return
 
     method = context.user_data["withdraw_method"]
     amount = context.user_data["withdraw_amount"]
     wallet = update.message.text
 
-    # Send to admin
     if ADMIN_ID != 0:
         await context.bot.send_message(
             ADMIN_ID,
             f"💸 *طلب سحب جديد!*\n\n"
-            f"👤 المستخدم: {user.first_name}\n"
-            f"🆔 ID: {user.id}\n"
-            f"💵 المبلغ: ${amount:.2f}\n"
-            f"💳 الطريقة: {method}\n"
-            f"🏦 المحفظة: {wallet}",
+            f"👤 {user.first_name}\n"
+            f"🆔 {user.id}\n"
+            f"💵 ${amount:.2f}\n"
+            f"💳 {method}\n"
+            f"🏦 {wallet}",
             parse_mode="Markdown"
         )
 
-    # Deduct points
     data = get_user(user.id, user.first_name)
     data["points"] = 0
+    data["withdrawn"] += amount
     context.user_data.clear()
 
     await update.message.reply_text(
         f"✅ *تم إرسال طلب السحب!*\n\n"
-        f"💵 المبلغ: ${amount:.2f}\n"
-        f"💳 الطريقة: {method}\n"
-        f"🏦 المحفظة: {wallet}\n\n"
-        f"⏳ سيتم المراجعة والتحويل خلال 24 ساعة.",
+        f"💵 ${amount:.2f} عبر {method}\n"
+        f"⏳ سيتم التحويل خلال 24 ساعة.",
         parse_mode="Markdown",
         reply_markup=main_menu()
     )
 
-# ========== ADMIN COMMANDS ==========
-async def handle_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text.strip()
-
-    # Not admin
-    if user.id != ADMIN_ID and ADMIN_ID != 0:
-        await update.message.reply_text("📌 ابعت رابط يبدأ بـ https://")
-        return
-
-    await update.message.reply_text(
-        "⚙️ *أوامر الأدمن:*\n\n"
-        "/addlink - إضافة رابط جديد\n"
-        "/links - عرض كل الروابط\n"
-        "/users - عرض المستخدمين\n"
-        "/dellink [id] - حذف رابط",
-        parse_mode="Markdown"
-    )
-
-async def add_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global link_counter
-    user = update.effective_user
-
-    if user.id != ADMIN_ID and ADMIN_ID != 0:
-        return
-
-    args = context.args
-    if len(args) < 3:
-        await update.message.reply_text(
-            "❌ الاستخدام:\n/addlink [رابط] [نقاط] [العنوان]\n\n"
-            "مثال:\n/addlink https://example.com 50 موقع رائع"
-        )
-        return
-
-    url = args[0]
-    points = int(args[1])
-    title = " ".join(args[2:])
-
-    links_db[link_counter] = {"url": url, "title": title, "points": points}
-    link_counter += 1
-
-    await update.message.reply_text(
-        f"✅ *تم إضافة الرابط!*\n\n"
-        f"🔗 {title}\n"
-        f"⭐ النقاط: {points}\n"
-        f"🆔 ID: {link_counter - 1}",
-        parse_mode="Markdown"
-    )
-
-async def list_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID and ADMIN_ID != 0:
-        return
-
-    if not links_db:
-        await update.message.reply_text("مفيش روابط!")
-        return
-
-    text = "🔗 *الروابط الحالية:*\n\n"
-    for lid, link in links_db.items():
-        text += f"ID: {lid} | {link['title']} | {link['points']} نقطة\n"
-
-    await update.message.reply_text(text, parse_mode="Markdown")
-
+# ========== ADMIN ==========
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID and ADMIN_ID != 0:
+    if update.effective_user.id != ADMIN_ID:
         return
-
     if not users_db:
         await update.message.reply_text("مفيش مستخدمين!")
         return
-
     text = "👥 *المستخدمين:*\n\n"
     for uid, udata in users_db.items():
+        clicks = user_tokens.get(uid, {}).get("clicks", 0)
         dollars = points_to_dollars(udata["points"])
-        text += f"👤 {udata['name']} | ID: {uid} | {udata['points']} نقطة (${dollars:.2f})\n"
-
+        text += f"👤 {udata['name']} | {udata['points']}⭐ (${dollars:.2f}) | {clicks} كليك\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def del_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID and ADMIN_ID != 0:
-        return
-
-    args = context.args
-    if not args:
-        await update.message.reply_text("❌ /dellink [id]")
-        return
-
-    lid = int(args[0])
-    if lid in links_db:
-        del links_db[lid]
-        await update.message.reply_text(f"✅ تم حذف الرابط {lid}")
-    else:
-        await update.message.reply_text("❌ الرابط مش موجود!")
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "❓ *كيف يعمل البوت؟*\n\n"
+        "1️⃣ اضغط 'رابطي الخاص'\n"
+        "2️⃣ البوت هيعملك رابط مختصر فريد\n"
+        "3️⃣ شارك الرابط مع أصحابك\n"
+        "4️⃣ لما حد يضغط عليه هيشوف إعلان\n"
+        "5️⃣ بعدين هيوصل للبوت وأنت تكسب 10 نقاط!\n\n"
+        "💰 *1000 نقطة = $1*\n"
+        f"📌 الحد الأدنى للسحب: ${MIN_WITHDRAWAL}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="back")]])
+    )
 
 async def back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -353,16 +351,14 @@ async def back(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("addlink", add_link))
-    app.add_handler(CommandHandler("links", list_links))
     app.add_handler(CommandHandler("users", list_users))
-    app.add_handler(CommandHandler("dellink", del_link))
-    app.add_handler(CallbackQueryHandler(browse_links, pattern="^browse_links$"))
-    app.add_handler(CallbackQueryHandler(click_link, pattern="^link_"))
-    app.add_handler(CallbackQueryHandler(skip_link, pattern="^skip_"))
+    app.add_handler(CallbackQueryHandler(my_link, pattern="^my_link$"))
+    app.add_handler(CallbackQueryHandler(renew_link, pattern="^renew_link$"))
     app.add_handler(CallbackQueryHandler(balance, pattern="^balance$"))
+    app.add_handler(CallbackQueryHandler(mystats, pattern="^mystats$"))
     app.add_handler(CallbackQueryHandler(withdraw, pattern="^withdraw$"))
     app.add_handler(CallbackQueryHandler(pay_method, pattern="^pay_"))
+    app.add_handler(CallbackQueryHandler(help_cmd, pattern="^help$"))
     app.add_handler(CallbackQueryHandler(back, pattern="^back$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
     print("Bot running...")
@@ -370,4 +366,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
