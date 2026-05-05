@@ -3,7 +3,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 BOT_TOKEN = "8263620123:AAEslo1rbEeqCDCkxz1iX_21XzcugPvXhvE"
-ADMIN_ID = 0  # غير ده لـ ID بتاعك
+ADMIN_ID = 6766597560 # غير ده لـ ID بتاعك
 MIN_WITHDRAWAL = 5.00  # الحد الأدنى للسحب
 POINTS_PER_DOLLAR = 1000  # 1000 نقطة = $1
 
