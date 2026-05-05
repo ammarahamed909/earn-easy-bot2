@@ -1,1 +1,1 @@
-worker: python earn_easy_bot.py
+worker: python earn*.py
